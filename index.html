@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Registro de Concentrado · Finca Buenos Aires</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { margin: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const { useState, useEffect } = React;
+
+
+
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx-iuBSXj18QpHyrQkjZOrfVfR9f7x7d8BuTWiGTAGPVLLs89dn97DAJeRdc9-BDLOR/exec";
+const SHEET_ID = "1Z2b9El8JHi0FWrfmUyuff19A5K0YYv0kUH0Tx1hqxRI";
+const KG_PER_BULTO = 40;
+const ANIMAL_TYPES = ["Cerdos", "Búfalas", "Pollos"];
+const LOTES = ["Lote 1", "Lote 2", "Lote 3"];
+
+const CONSUMO_GVIZ = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent("registro en finca")}`;
+const INVENTARIO_GVIZ = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent("inventario")}`;
+
+const getWeekNumber = (date) => {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() + 3 - ((d.getDay() + 6) % 7));
+  const week1 = new Date(d.getFullYear(), 0, 4);
+  return (
+    1 + Math.round(((d.getTime() - week1.getTime()) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7)
+  );
+};
+
+const today = () => new Date().toISOString().split("T")[0];
+const formatDate = (iso) => { const [y, m, d] = iso.split("-"); return `${d}/${m}/${y}`; };
+const num = (n, dec = 2) => isNaN(n) ? "—" : Number(n).toLocaleString("es-CO", { maximumFractionDigits: dec });
+const currency = (n) => new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(n);
+
+const C = {
+  green: "#2D6A4F", greenLight: "#52B788", greenPale: "#D8F3DC",
+  cream: "#FAFAF7", text: "#1B2D24", muted: "#6B7C75",
+  white: "#FFFFFF", border: "#E0EAE4", highlight: "#1A4731",
+  error: "#C1121F", accent: "#F4A261",
+};
+
+// ─── Parse Google Sheets gviz response ───────────────────────────────────────
+const parseGviz = (raw) => {
+  try {
+    const json = JSON.parse(raw.replace(/^[^(]+\(/, "").replace(/\);?\s*$/, ""));
+    return json.table.rows.map((row) => row.c.map((c) => (c ? c.v : null)));
+  } catch (e) {
+    return [];
+  }
+};
+
+const getInventoryByAnimal = async () => {
+  // Returns { Cerdos: { bultosComprados, kgComprados, costoTotalCompras }, ... }
+  const result = {};
+  ANIMAL_TYPES.forEach((a) => (result[a] = { bultosComprados: 0, kgComprados: 0, costoTotalCompras: 0 }));
+
+  try {
+    const [invRes, consRes] = await Promise.all([
+      fetch(INVENTARIO_GVIZ).then((r) => r.text()),
+      fetch(CONSUMO_GVIZ).then((r) => r.text()),
+    ]);
+    const invRows = parseGviz(invRes); // fecha, animal, bultos, kilos, costoConcentrado, costoTransporte, costoTotal, costoPorBulto
+    const consRows = parseGviz(consRes); // fecha, semana, animal, lote, kilos, bultos
+
+    invRows.forEach((row) => {
+      const [, animal, bultos, kilos, , , costoTotal] = row;
+      if (animal && result[animal]) {
+        result[animal].bultosComprados += Number(bultos) || 0;
+        result[animal].kgComprados += Number(kilos) || 0;
+        result[animal].costoTotalCompras += Number(costoTotal) || 0;
+      }
+    });
+
+    consRows.forEach((row) => {
+      const [, , animal, , kilos] = row;
+      if (animal && result[animal]) {
+        result[animal].kgConsumidos = (result[animal].kgConsumidos || 0) + (Number(kilos) || 0);
+      }
+    });
+  } catch (e) {
+    console.error("Error loading inventory", e);
+  }
+
+  ANIMAL_TYPES.forEach((a) => {
+    const r = result[a];
+    r.kgConsumidos = r.kgConsumidos || 0;
+    r.kgDisponibles = r.kgComprados - r.kgConsumidos;
+    r.bultosDisponibles = r.kgDisponibles / KG_PER_BULTO;
+  });
+
+  return result;
+};
+
+function FincaForm() {
+  const [mode, setMode] = useState("consumo"); // consumo | compra
+  const [inventory, setInventory] = useState(null);
+  const [loadingInv, setLoadingInv] = useState(true);
+
+  // ── Consumo form state ──
+  const [form, setForm] = useState({ animal: "", lote: "", fecha: today(), kilos: "" });
+  const [status, setStatus] = useState("idle");
+  const [error, setError] = useState("");
+
+  // ── Compra form state ──
+  const [compra, setCompra] = useState({
+    animal: "", fecha: today(), bultos: "", costoConcentrado: "", costoTransporte: "",
+  });
+  const [compraStatus, setCompraStatus] = useState("idle");
+  const [compraError, setCompraError] = useState("");
+
+  const loadInventory = async () => {
+    setLoadingInv(true);
+    const data = await getInventoryByAnimal();
+    setInventory(data);
+    setLoadingInv(false);
+  };
+
+  useEffect(() => { loadInventory(); }, []);
+
+  // ── Submit consumo ──
+  const handle = (k, v) => setForm((f) => ({ ...f, [k]: v }));
+
+  const submitConsumo = async () => {
+    if (!form.animal || !form.lote || !form.fecha || !form.kilos) {
+      setError("Por favor completa todos los campos.");
+      return;
+    }
+    setError("");
+    setStatus("sending");
+
+    const payload = {
+      tipo: "consumo",
+      fecha: form.fecha,
+      semana: getWeekNumber(form.fecha),
+      animal: form.animal,
+      lote: form.lote,
+      kilos: Number(form.kilos),
+      bultos: Number((Number(form.kilos) / KG_PER_BULTO).toFixed(4)),
+    };
+
+    try {
+      await fetch(SCRIPT_URL, {
+        method: "POST", mode: "no-cors",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      setStatus("success");
+      // Optimistically update local inventory view
+      setInventory((prev) => {
+        if (!prev) return prev;
+        const updated = { ...prev };
+        const a = form.animal;
+        updated[a] = {
+          ...updated[a],
+          kgConsumidos: updated[a].kgConsumidos + Number(form.kilos),
+          kgDisponibles: updated[a].kgDisponibles - Number(form.kilos),
+          bultosDisponibles: (updated[a].kgDisponibles - Number(form.kilos)) / KG_PER_BULTO,
+        };
+        return updated;
+      });
+    } catch (e) {
+      setStatus("error");
+    }
+  };
+
+  const resetConsumo = () => {
+    setForm({ animal: "", lote: "", fecha: today(), kilos: "" });
+    setStatus("idle");
+    setError("");
+    loadInventory();
+  };
+
+  // ── Submit compra ──
+  const handleCompra = (k, v) => setCompra((c) => ({ ...c, [k]: v }));
+
+  const submitCompra = async () => {
+    if (!compra.animal || !compra.fecha || !compra.bultos || !compra.costoConcentrado) {
+      setCompraError("Completa al menos: animal, fecha, bultos y costo del concentrado.");
+      return;
+    }
+    setCompraError("");
+    setCompraStatus("sending");
+
+    const bultos = Number(compra.bultos);
+    const kilos = bultos * KG_PER_BULTO;
+    const costoConcentrado = Number(compra.costoConcentrado);
+    const costoTransporte = Number(compra.costoTransporte) || 0;
+    const costoTotal = costoConcentrado + costoTransporte;
+    const costoPorBulto = bultos > 0 ? costoTotal / bultos : 0;
+
+    const payload = {
+      tipo: "compra",
+      fecha: compra.fecha,
+      animal: compra.animal,
+      bultos, kilos,
+      costoConcentrado, costoTransporte, costoTotal, costoPorBulto,
+    };
+
+    try {
+      await fetch(SCRIPT_URL, {
+        method: "POST", mode: "no-cors",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      setCompraStatus("success");
+      setInventory((prev) => {
+        if (!prev) return prev;
+        const updated = { ...prev };
+        const a = compra.animal;
+        updated[a] = {
+          ...updated[a],
+          kgComprados: updated[a].kgComprados + kilos,
+          kgDisponibles: updated[a].kgDisponibles + kilos,
+          bultosDisponibles: (updated[a].kgDisponibles + kilos) / KG_PER_BULTO,
+          costoTotalCompras: updated[a].costoTotalCompras + costoTotal,
+        };
+        return updated;
+      });
+    } catch (e) {
+      setCompraStatus("error");
+    }
+  };
+
+  const resetCompra = () => {
+    setCompra({ animal: "", fecha: today(), bultos: "", costoConcentrado: "", costoTransporte: "" });
+    setCompraStatus("idle");
+    setCompraError("");
+    loadInventory();
+  };
+
+  const InventoryBadge = ({ animal }) => {
+    if (!animal || !inventory) return null;
+    const inv = inventory[animal];
+    if (!inv) return null;
+    const emoji = animal === "Cerdos" ? "🐷" : animal === "Búfalas" ? "🐃" : "🐔";
+    const low = inv.kgDisponibles < KG_PER_BULTO * 2;
+    return (
+      <div style={{ ...s.invBadge, ...(low ? s.invBadgeLow : {}) }}>
+        <span style={s.invBadgeEmoji}>{emoji}</span>
+        <div>
+          <p style={s.invBadgeLabel}>Disponible en inventario</p>
+          <p style={s.invBadgeVal}>
+            {num(inv.bultosDisponibles)} bultos <span style={s.invBadgeKg}>({num(inv.kgDisponibles, 0)} kg)</span>
+          </p>
+        </div>
+      </div>
+    );
+  };
+
+  // ════════════════ SUCCESS / ERROR SCREENS ════════════════
+  if (mode === "consumo" && status === "success") {
+    return (
+      <Wrapper>
+        <SuccessCard
+          title="¡Registro guardado!"
+          sub={`${form.animal} · ${form.lote}`}
+          detail={`${form.kilos} kg · ${formatDate(form.fecha)}`}
+          hint={`≈ ${(Number(form.kilos) / KG_PER_BULTO).toFixed(2)} bultos · Semana ${getWeekNumber(form.fecha)}`}
+          onReset={resetConsumo}
+        />
+      </Wrapper>
+    );
+  }
+  if (mode === "consumo" && status === "error") {
+    return (
+      <Wrapper>
+        <ErrorCard onBack={() => setStatus("idle")} />
+      </Wrapper>
+    );
+  }
+  if (mode === "compra" && compraStatus === "success") {
+    return (
+      <Wrapper>
+        <SuccessCard
+          title="¡Compra registrada!"
+          sub={`${compra.animal} · ${compra.bultos} bultos`}
+          detail={currency(Number(compra.costoConcentrado) + (Number(compra.costoTransporte) || 0))}
+          hint={`Costo por bulto: ${currency((Number(compra.costoConcentrado) + (Number(compra.costoTransporte) || 0)) / Number(compra.bultos))}`}
+          onReset={resetCompra}
+        />
+      </Wrapper>
+    );
+  }
+  if (mode === "compra" && compraStatus === "error") {
+    return (
+      <Wrapper>
+        <ErrorCard onBack={() => setCompraStatus("idle")} />
+      </Wrapper>
+    );
+  }
+
+  // ════════════════ MAIN FORM ════════════════
+  return (
+    <Wrapper>
+      {/* Mode toggle */}
+      <div style={s.modeToggle}>
+        <button
+          style={{ ...s.modeBtn, ...(mode === "consumo" ? s.modeBtnActive : {}) }}
+          onClick={() => setMode("consumo")}
+        >
+          🌾 Consumo diario
+        </button>
+        <button
+          style={{ ...s.modeBtn, ...(mode === "compra" ? s.modeBtnActive : {}) }}
+          onClick={() => setMode("compra")}
+        >
+          📦 Registrar compra
+        </button>
+      </div>
+
+      {mode === "consumo" ? (
+        <div style={s.card}>
+          {/* Animal */}
+          <div style={s.field}>
+            <label style={s.label}>Tipo de animal</label>
+            <div style={s.chipGroup}>
+              {ANIMAL_TYPES.map((a) => (
+                <button
+                  key={a}
+                  style={{ ...s.chip, ...(form.animal === a ? s.chipActive : {}) }}
+                  onClick={() => handle("animal", a)}
+                >
+                  {a === "Cerdos" ? "🐷" : a === "Búfalas" ? "🐃" : "🐔"} {a}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {form.animal && (loadingInv ? (
+            <p style={s.invLoading}>Consultando inventario...</p>
+          ) : (
+            <InventoryBadge animal={form.animal} />
+          ))}
+
+          {/* Lote */}
+          <div style={s.field}>
+            <label style={s.label}>Lote</label>
+            <div style={s.chipGroup}>
+              {LOTES.map((l) => (
+                <button
+                  key={l}
+                  style={{ ...s.chip, ...(form.lote === l ? s.chipActive : {}) }}
+                  onClick={() => handle("lote", l)}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Fecha */}
+          <div style={s.field}>
+            <label style={s.label}>Fecha</label>
+            <input style={s.input} type="date" value={form.fecha} onChange={(e) => handle("fecha", e.target.value)} />
+          </div>
+
+          {/* Kilos */}
+          <div style={s.field}>
+            <label style={s.label}>Cantidad de alimento (kg)</label>
+            <div style={s.kilosGrid}>
+              {Array.from({ length: 100 }, (_, i) => i + 1).map((k) => (
+                <button
+                  key={k}
+                  style={{ ...s.kiloChip, ...(form.kilos === String(k) ? s.kiloChipActive : {}) }}
+                  onClick={() => handle("kilos", String(k))}
+                >
+                  {k}
+                </button>
+              ))}
+            </div>
+            {form.kilos && (
+              <p style={s.hint}>
+                {form.kilos} kg ≈ {(Number(form.kilos) / KG_PER_BULTO).toFixed(2)} bultos · Semana {getWeekNumber(form.fecha)}
+              </p>
+            )}
+          </div>
+
+          {error && <p style={s.errorMsg}>{error}</p>}
+
+          <button style={{ ...s.btnPrimary, opacity: status === "sending" ? 0.7 : 1 }} onClick={submitConsumo} disabled={status === "sending"}>
+            {status === "sending" ? "Guardando..." : "Guardar registro"}
+          </button>
+        </div>
+      ) : (
+        <div style={s.card}>
+          <p style={s.compraIntro}>Registra una nueva compra de concentrado, incluyendo el costo del transporte.</p>
+
+          {/* Animal */}
+          <div style={s.field}>
+            <label style={s.label}>Tipo de animal</label>
+            <div style={s.chipGroup}>
+              {ANIMAL_TYPES.map((a) => (
+                <button
+                  key={a}
+                  style={{ ...s.chip, ...(compra.animal === a ? s.chipActive : {}) }}
+                  onClick={() => handleCompra("animal", a)}
+                >
+                  {a === "Cerdos" ? "🐷" : a === "Búfalas" ? "🐃" : "🐔"} {a}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {compra.animal && !loadingInv && <InventoryBadge animal={compra.animal} />}
+
+          {/* Fecha */}
+          <div style={s.field}>
+            <label style={s.label}>Fecha de compra</label>
+            <input style={s.input} type="date" value={compra.fecha} onChange={(e) => handleCompra("fecha", e.target.value)} />
+          </div>
+
+          {/* Bultos */}
+          <div style={s.field}>
+            <label style={s.label}>Cantidad comprada (bultos de 40 kg)</label>
+            <input
+              style={s.input} type="number" inputMode="decimal" placeholder="Ej: 10"
+              value={compra.bultos} onChange={(e) => handleCompra("bultos", e.target.value)}
+            />
+            {compra.bultos && (
+              <p style={s.hint}>{compra.bultos} bultos = {(Number(compra.bultos) * KG_PER_BULTO).toLocaleString("es-CO")} kg</p>
+            )}
+          </div>
+
+          {/* Costo concentrado */}
+          <div style={s.field}>
+            <label style={s.label}>Costo del concentrado (COP)</label>
+            <input
+              style={s.input} type="number" inputMode="decimal" placeholder="Ej: 850000"
+              value={compra.costoConcentrado} onChange={(e) => handleCompra("costoConcentrado", e.target.value)}
+            />
+          </div>
+
+          {/* Costo transporte */}
+          <div style={s.field}>
+            <label style={s.label}>Costo de transporte (COP)</label>
+            <input
+              style={s.input} type="number" inputMode="decimal" placeholder="Ej: 50000"
+              value={compra.costoTransporte} onChange={(e) => handleCompra("costoTransporte", e.target.value)}
+            />
+          </div>
+
+          {compra.bultos && compra.costoConcentrado && (
+            <div style={s.previewBox}>
+              <p style={s.previewLabel}>Costo total de esta compra</p>
+              <p style={s.previewVal}>
+                {currency(Number(compra.costoConcentrado) + (Number(compra.costoTransporte) || 0))}
+              </p>
+              <p style={s.previewSub}>
+                Costo real por bulto: {currency((Number(compra.costoConcentrado) + (Number(compra.costoTransporte) || 0)) / Number(compra.bultos))}
+              </p>
+            </div>
+          )}
+
+          {compraError && <p style={s.errorMsg}>{compraError}</p>}
+
+          <button style={{ ...s.btnPrimary, opacity: compraStatus === "sending" ? 0.7 : 1 }} onClick={submitCompra} disabled={compraStatus === "sending"}>
+            {compraStatus === "sending" ? "Guardando..." : "Registrar compra"}
+          </button>
+        </div>
+      )}
+
+      <p style={s.footer}>Ciclo Regenerative Farming · La Unión, Antioquia</p>
+    </Wrapper>
+  );
+}
+
+function Wrapper({ children }) {
+  return (
+    <div style={s.page}>
+      <div style={s.header}>
+        <span style={s.logo}>🌿</span>
+        <div>
+          <p style={s.fincaLabel}>Finca Buenos Aires</p>
+          <h1 style={s.title}>Registro de Concentrado</h1>
+        </div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function SuccessCard({ title, sub, detail, hint, onReset }) {
+  return (
+    <div style={s.successCard}>
+      <div style={s.checkCircle}>✓</div>
+      <h2 style={s.successTitle}>{title}</h2>
+      <p style={s.successSub}>{sub}</p>
+      <p style={s.successDetail}>{detail}</p>
+      {hint && <p style={s.successHint}>{hint}</p>}
+      <button style={s.btnPrimary} onClick={onReset}>Registrar otro</button>
+    </div>
+  );
+}
+
+function ErrorCard({ onBack }) {
+  return (
+    <div style={s.successCard}>
+      <div style={{ ...s.checkCircle, background: C.error }}>✕</div>
+      <h2 style={s.successTitle}>Error al guardar</h2>
+      <p style={s.successSub}>Verifica tu conexión a internet e intenta de nuevo.</p>
+      <button style={s.btnPrimary} onClick={onBack}>Volver</button>
+    </div>
+  );
+}
+
+const s = {
+  page: {
+    minHeight: "100vh",
+    background: `linear-gradient(160deg, ${C.greenPale} 0%, ${C.cream} 60%)`,
+    fontFamily: "'Georgia', 'Times New Roman', serif",
+    paddingBottom: 40,
+  },
+  header: { display: "flex", alignItems: "center", gap: 12, background: C.green, padding: "18px 20px", color: C.white },
+  logo: { fontSize: 28 },
+  fincaLabel: { margin: 0, fontSize: 11, letterSpacing: 2, textTransform: "uppercase", opacity: 0.75, fontFamily: "sans-serif" },
+  title: { margin: 0, fontSize: 20, fontWeight: "normal", letterSpacing: 0.5 },
+  modeToggle: { display: "flex", gap: 8, margin: "20px 16px 0", background: C.white, padding: 5, borderRadius: 14, border: `1px solid ${C.border}` },
+  modeBtn: {
+    flex: 1, padding: "10px 8px", borderRadius: 10, border: "none",
+    background: "transparent", fontSize: 13, fontFamily: "sans-serif",
+    fontWeight: 700, color: C.muted, cursor: "pointer",
+  },
+  modeBtnActive: { background: C.green, color: C.white },
+  card: { margin: "16px 16px 24px", background: C.white, borderRadius: 16, padding: 24, boxShadow: "0 4px 24px rgba(45,106,79,0.10)", border: `1px solid ${C.border}` },
+  compraIntro: { margin: "0 0 20px", fontSize: 13, color: C.muted, fontFamily: "sans-serif", lineHeight: 1.5 },
+  field: { marginBottom: 22 },
+  label: { display: "block", fontSize: 11, fontFamily: "sans-serif", letterSpacing: 1.5, textTransform: "uppercase", color: C.muted, marginBottom: 10, fontWeight: 700 },
+  chipGroup: { display: "flex", gap: 8, flexWrap: "wrap" },
+  chip: { padding: "10px 16px", borderRadius: 40, border: `2px solid ${C.border}`, background: C.cream, cursor: "pointer", fontSize: 14, fontFamily: "sans-serif", color: C.text },
+  chipActive: { background: C.green, color: C.white, borderColor: C.green },
+  input: { width: "100%", padding: "12px 14px", borderRadius: 10, border: `1.5px solid ${C.border}`, fontSize: 16, fontFamily: "sans-serif", color: C.text, background: C.cream, outline: "none", boxSizing: "border-box" },
+  kilosGrid: { display: "grid", gridTemplateColumns: "repeat(8, 1fr)", gap: 6 },
+  kiloChip: { padding: "10px 0", borderRadius: 8, border: `1.5px solid ${C.border}`, background: C.cream, cursor: "pointer", fontSize: 14, fontFamily: "sans-serif", color: C.text, fontWeight: 600, textAlign: "center" },
+  kiloChipActive: { background: C.green, color: C.white, borderColor: C.green },
+  hint: { margin: "8px 0 0", fontSize: 12, color: C.green, fontFamily: "sans-serif" },
+  errorMsg: { color: C.error, fontSize: 13, fontFamily: "sans-serif", margin: "0 0 12px" },
+  btnPrimary: { width: "100%", padding: "14px", background: C.green, color: C.white, border: "none", borderRadius: 12, fontSize: 16, fontFamily: "sans-serif", fontWeight: 700, cursor: "pointer", letterSpacing: 0.5 },
+  successCard: { margin: "60px 20px", background: C.white, borderRadius: 20, padding: 36, textAlign: "center", boxShadow: "0 8px 32px rgba(45,106,79,0.15)" },
+  checkCircle: { width: 64, height: 64, borderRadius: "50%", background: C.green, color: C.white, fontSize: 32, display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px" },
+  successTitle: { margin: "0 0 8px", color: C.text, fontSize: 22 },
+  successSub: { margin: "0 0 4px", color: C.muted, fontFamily: "sans-serif", fontSize: 15 },
+  successDetail: { margin: "0 0 4px", color: C.green, fontFamily: "sans-serif", fontSize: 18, fontWeight: 700 },
+  successHint: { margin: "0 0 24px", color: C.muted, fontFamily: "sans-serif", fontSize: 13 },
+  footer: { textAlign: "center", fontSize: 11, color: C.muted, fontFamily: "sans-serif", letterSpacing: 1, marginTop: 24 },
+  invLoading: { fontSize: 12, color: C.muted, fontFamily: "sans-serif", margin: "-10px 0 16px" },
+  invBadge: { display: "flex", alignItems: "center", gap: 12, background: C.greenPale, borderRadius: 12, padding: "12px 16px", marginBottom: 20 },
+  invBadgeLow: { background: "#FFF3E0" },
+  invBadgeEmoji: { fontSize: 24 },
+  invBadgeLabel: { margin: "0 0 2px", fontSize: 10, color: C.muted, fontFamily: "sans-serif", textTransform: "uppercase", letterSpacing: 1 },
+  invBadgeVal: { margin: 0, fontSize: 16, fontWeight: 700, color: C.green, fontFamily: "sans-serif" },
+  invBadgeKg: { fontSize: 12, fontWeight: 400, color: C.muted },
+  previewBox: { background: C.greenPale, borderRadius: 12, padding: "14px 16px", marginBottom: 20, textAlign: "center" },
+  previewLabel: { margin: "0 0 4px", fontSize: 11, color: C.muted, fontFamily: "sans-serif", textTransform: "uppercase", letterSpacing: 1 },
+  previewVal: { margin: "0 0 4px", fontSize: 20, fontWeight: 700, color: C.green, fontFamily: "sans-serif" },
+  previewSub: { margin: 0, fontSize: 12, color: C.muted, fontFamily: "sans-serif" },
+};
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<FincaForm />);
+</script>
+</body>
+</html>
