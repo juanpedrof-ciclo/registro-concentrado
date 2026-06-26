@@ -6,7 +6,7 @@
 <title>Registro de Concentrado · Finca Buenos Aires</title>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { margin: 0; }
@@ -244,7 +244,7 @@ function FincaForm() {
     const inv = inventory[animal];
     if (!inv) return null;
     const emoji = animal === "Cerdos" ? "🐷" : animal === "Búfalas" ? "🐃" : "🐔";
-    const low = inv.kgDisponibles < KG_PER_BULTO * 2;
+    const low = (inv.kgDisponibles < KG_PER_BULTO * 2);
     return (
       <div style={{ ...s.invBadge, ...(low ? s.invBadgeLow : {}) }}>
         <span style={s.invBadgeEmoji}>{emoji}</span>
