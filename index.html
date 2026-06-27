@@ -33,7 +33,7 @@ const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbx-iuBSXj18QpHyrQkjZ
 const SHEET_ID = "1Z2b9El8JHi0FWrfmUyuff19A5K0YYv0kUH0Tx1hqxRI";
 const KG_PER_BULTO = 40;
 const ANIMAL_TYPES = ["Cerdos", "Búfalas", "Pollos"];
-const LOTES = ["Lote 1", "Lote 2", "Lote 3"];
+const LOTES = ["Lote 1"];
 
 const CONSUMO_GVIZ = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent("registro en finca")}`;
 const INVENTARIO_GVIZ = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent("inventario")}`;
@@ -85,9 +85,10 @@ const parseGviz = (raw) => {
 };
 
 const getInventoryByAnimal = async () => {
-  // Returns { Cerdos: { bultosComprados, kgComprados, costoTotalCompras }, ... }
+  // Returns { inventory: {...}, lastRecord: {...} | null }
   const result = {};
   ANIMAL_TYPES.forEach((a) => (result[a] = { bultosComprados: 0, kgComprados: 0, costoTotalCompras: 0 }));
+  let lastRecord = null;
 
   try {
     const [invRes, consRes] = await Promise.all([
@@ -112,6 +113,14 @@ const getInventoryByAnimal = async () => {
         result[animal].kgConsumidos = (result[animal].kgConsumidos || 0) + (Number(kilos) || 0);
       }
     });
+
+    if (consRows.length > 0) {
+      const last = consRows[consRows.length - 1];
+      const [fecha, semana, animal, lote, kilos] = last;
+      if (animal) {
+        lastRecord = { fecha, semana, animal, lote, kilos: Number(kilos) || 0 };
+      }
+    }
   } catch (e) {
     console.error("Error loading inventory", e);
   }
@@ -123,13 +132,14 @@ const getInventoryByAnimal = async () => {
     r.bultosDisponibles = r.kgDisponibles / KG_PER_BULTO;
   });
 
-  return result;
+  return { inventory: result, lastRecord };
 };
 
 function FincaForm() {
   const [mode, setMode] = useState("consumo"); // consumo | compra
   const [inventory, setInventory] = useState(null);
   const [loadingInv, setLoadingInv] = useState(true);
+  const [lastRecord, setLastRecord] = useState(null);
 
   // ── Consumo form state ──
   const [form, setForm] = useState({ animal: "", lote: "", fecha: today(), kilos: "" });
@@ -146,7 +156,8 @@ function FincaForm() {
   const loadInventory = async () => {
     setLoadingInv(true);
     const data = await getInventoryByAnimal();
-    setInventory(data);
+    setInventory(data.inventory);
+    setLastRecord(data.lastRecord);
     setLoadingInv(false);
   };
 
@@ -345,6 +356,19 @@ function FincaForm() {
 
       {mode === "consumo" ? (
         <div style={s.card}>
+          {!loadingInv && lastRecord && (
+            <div style={s.lastRecordBox}>
+              <p style={s.lastRecordLabel}>📝 Último registro guardado</p>
+              <p style={s.lastRecordVal}>
+                {lastRecord.animal === "Cerdos" ? "🐷" : lastRecord.animal === "Búfalas" ? "🐃" : "🐔"}{" "}
+                {lastRecord.animal} · {lastRecord.lote}
+              </p>
+              <p style={s.lastRecordDetail}>
+                {lastRecord.kilos} kg · {formatDate(lastRecord.fecha)}
+              </p>
+            </div>
+          )}
+
           {/* Animal */}
           <div style={s.field}>
             <label style={s.label}>Tipo de animal</label>
@@ -578,6 +602,13 @@ const s = {
   successHint: { margin: "0 0 24px", color: C.muted, fontFamily: "sans-serif", fontSize: 13 },
   footer: { textAlign: "center", fontSize: 11, color: C.muted, fontFamily: "sans-serif", letterSpacing: 1, marginTop: 24 },
   invLoading: { fontSize: 12, color: C.muted, fontFamily: "sans-serif", margin: "-10px 0 16px" },
+  lastRecordBox: {
+    background: C.cream, border: `1.5px dashed ${C.border}`, borderRadius: 12,
+    padding: "12px 16px", marginBottom: 22,
+  },
+  lastRecordLabel: { margin: "0 0 6px", fontSize: 11, color: C.muted, fontFamily: "sans-serif", textTransform: "uppercase", letterSpacing: 1, fontWeight: 700 },
+  lastRecordVal: { margin: "0 0 2px", fontSize: 15, color: C.text, fontFamily: "sans-serif", fontWeight: 700 },
+  lastRecordDetail: { margin: 0, fontSize: 13, color: C.muted, fontFamily: "sans-serif" },
   invBadge: { display: "flex", alignItems: "center", gap: 12, background: C.greenPale, borderRadius: 12, padding: "12px 16px", marginBottom: 20 },
   invBadgeLow: { background: "#FFF3E0" },
   invBadgeEmoji: { fontSize: 24 },
